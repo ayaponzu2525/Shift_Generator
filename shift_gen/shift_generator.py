@@ -111,24 +111,41 @@ class ShiftGenerator:
         available_employees = self.get_available_employees(date, start_hour, end_hour)
         assigned_employees = []
 
-        while available_employees and len(assigned_employees) < self.strict_max_employees[shift_name]:
-            best_employee = self.select_best_employee(available_employees, date, start_hour, end_hour, len(assigned_employees))
-            if best_employee:
-                emp_start, emp_end = self.get_employee_preferred_time(best_employee, date, start_hour, end_hour)
-                if emp_start is not None and emp_end is not None:
-                    if emp_end - emp_start >= self.min_shift_duration:
-                        if not any(emp['employee']['id'] == best_employee['id'] for emp in assigned_employees):
-                            if random.randint(1, 100) <= self.preference_rates[best_employee['id']]:
-                                assigned_employees.append({
-                                    'employee': best_employee,
-                                    'start': emp_start,
-                                    'end': emp_end,
-                                    'break': self.calculate_break_after_merge(emp_start, emp_end)
-                                })
-            available_employees.remove(best_employee)
+        required_cashiers = self.min_employees[shift_name]
+        if self.check_if_holiday(date):
+            required_cashiers += 2  # 土日祝は2人追加
 
-        self.shifts[date][shift_name] = assigned_employees
-        return assigned_employees
+        while len(assigned_employees) < required_cashiers and available_employees:
+            best_employee = self.select_best_employee(available_employees, date, start_hour, end_hour)
+            if best_employee:
+                assigned_employees.append({
+                    'employee': best_employee,
+                    'start': start_hour,
+                    'end': end_hour,
+                    'break': self.calculate_break(start_hour, end_hour)
+                })
+            available_employees.remove(best_employee)
+        
+            # 休憩回し用の追加従業員を割り当て
+        additional_employees = min(2, len(available_employees))  # 最大2人まで追加
+        for _ in range(additional_employees):
+            if available_employees:
+                employee = self.select_best_employee(available_employees, date, start_hour, end_hour)
+                assigned_employees.append({
+                    'employee': employee,
+                    'start': start_hour,
+                    'end': end_hour,
+                    'break': self.calculate_break(start_hour, end_hour),
+                    'role': '補助'
+                })
+                available_employees.remove(employee)
+                
+        if shift_name == '夜' and not any('冷蔵' in emp['employee']['skills'] for emp in assigned_employees):
+            return None, "夜シフトに冷蔵スキルを持つ従業員がいません"
+
+        return assigned_employees, None  # 警告メッセージがない場合はNone
+
+
 
     def get_shift_name(self, hour):
           if 5 <= hour < 9:
@@ -432,46 +449,24 @@ class ShiftGenerator:
         return sorted(all_preferences)
 
     #シフト生成
-    def generate_shifts(self, start_date: datetime.date, end_date: datetime.date) -> Dict:
-        shortages = defaultdict(lambda: defaultdict(int))
-        skill_shortages = defaultdict(lambda: defaultdict(bool))
-
+    def generate_shifts(self, start_date: datetime.date, end_date: datetime.date):
         for date in (start_date + datetime.timedelta(n) for n in range((end_date - start_date).days + 1)):
-            is_holiday = self.check_if_holiday(date)
-            day_preferences = self.get_day_preferences(date)
-
-            if not day_preferences:
-                day_preferences = [(9, 14), (14, 17), (17, 20)]
-
             print(f"Date: {date}")
-            daily_warnings = defaultdict(set)  # setを使用して重複を排除
-
-            for start_hour, end_hour in day_preferences:
-                shift_name = self.get_shift_name(start_hour)
-                required_cashiers = self.min_employees[shift_name] + (1 if is_holiday else 0)
-                assigned_employees = self.assign_shift(date, shift_name, start_hour, end_hour)
-
-                shortage = max(0, required_cashiers - len(assigned_employees))
-                if shortage > 0:
-                    shortages[date][shift_name] = shortage
-                    daily_warnings[shift_name].add(f"{shortage}人不足")
-
-                has_refrigeration_skill = any('冷蔵' in emp['employee']['skills'] for emp in assigned_employees)
-                if not has_refrigeration_skill:
-                    skill_shortages[date][shift_name] = True
-                    daily_warnings[shift_name].add("冷蔵スキルを持つ従業員が不在")
-
+            for shift_name in ['朝', '昼', '夜']:
+                start_hour, end_hour = self.get_shift_hours(shift_name)
+                assigned_employees, warning = self.assign_shift(date, shift_name, start_hour, end_hour)
+                
+                if warning:
+                    print(f"  {shift_name}の警告: {warning}")
+                elif len(assigned_employees) < self.min_employees[shift_name]:
+                    shortage = self.min_employees[shift_name] - len(assigned_employees)
+                    print(f"  {shift_name}の警告: {shortage}人不足しています")
+                
+                # シフトの表示
                 print(f"  {shift_name} shift: {len(assigned_employees)} employees assigned")
                 for emp in assigned_employees:
                     print(f"    {emp['employee']['name']}: {emp['start']}:00 - {emp['end']}:00 (休憩: {emp['break']}分)")
-
-            # 警告をまとめて表示
-            for shift_name, warnings in daily_warnings.items():
-                if warnings:
-                    print(f"  {shift_name}の警告: {', '.join(warnings)}")
             print()
-
-        return self.shifts, shortages, skill_shortages
 
 
     def get_day_of_week(self, date):
