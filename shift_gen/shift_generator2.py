@@ -1,29 +1,77 @@
 import pandas as pd
-import random
-from datetime import datetime, time, timedelta
-import holidays  # 日本の祝日を扱うライブラリ
+import datetime
 from collections import defaultdict
+import holidays
 
-# 従業員を表すクラス
 class Employee:
-    def __init__(self, name, register_skill, preferences):
+    def __init__(self, id, name, register_skill, preferences):
+        self.id = id  # 従業員ID
         self.name = name  # 従業員の名前
         self.register_skill = register_skill  # レジスキルの有無（True/False）
-        self.preferences = preferences  # 希望シフト時間のリスト
+        self.preferences = preferences  # 希望シフト時間のリスト（辞書形式：{日付: [(開始時間, 終了時間), ...]}）
         self.shifts = []  # 割り当てられたシフトを格納するリスト
-        self.preference_reflection_rate = 0  # 希望シフトの反映率
+        self.preference_reflection_rate = None  # 希望シフトの反映率（初期値はNone、シフト生成後に計算）
 
-# シフトスケジューラーを表すクラス
-class ShiftScheduler:
-    def __init__(self, csv_file, start_date, end_date):
-        self.employees, self.preferences = self.load_data(csv_file)
-        self.start_date = start_date
-        self.end_date = end_date
-        self.schedule = {}
+    def calculate_preference_reflection_rate(self, start_date, end_date):
+        """
+        指定された期間における希望シフトの反映率を計算する
+        
+        :param start_date: 計算開始日
+        :param end_date: 計算終了日
+        :return: 希望シフトの反映率（0-100の範囲）
+        """
+        total_preferred_hours = 0
+        total_assigned_hours = 0
+        current_date = start_date
+        while current_date <= end_date:
+            # その日の希望シフト時間を合計
+            preferred_hours = sum((end - start).total_seconds() / 3600 
+                                  for start, end in self.preferences.get(current_date, []))
+            # その日の割り当てられたシフト時間を合計
+            assigned_hours = sum((shift.end_time - shift.start_time).total_seconds() / 3600 
+                                 for shift in self.shifts if shift.start_time.date() == current_date)
+            total_preferred_hours += preferred_hours
+            total_assigned_hours += assigned_hours
+            current_date += datetime.timedelta(days=1)
+        
+        # 希望シフト時間がある場合のみ反映率を計算
+        if total_preferred_hours > 0:
+            self.preference_reflection_rate = (total_assigned_hours / total_preferred_hours) * 100
+        else:
+            self.preference_reflection_rate = 0
+        
+        return self.preference_reflection_rate
 
-        # 日本の祝日リストを生成
-        self.jp_holidays = holidays.JP(years=range(start_date.year, end_date.year + 1))
+class Shift:
+    def __init__(self, start_time, end_time, employee):
+        self.start_time = start_time  # シフト開始時間
+        self.end_time = end_time  # シフト終了時間
+        self.employee = employee  # シフトに割り当てられた従業員
+        self.break_time = self.calculate_break_time()  # 休憩時間
 
+    def calculate_break_time(self):
+        """
+        シフトの長さに基づいて休憩時間を計算する
+        
+        :return: 休憩時間（分）
+        """
+        shift_duration = (self.end_time - self.start_time).total_seconds() / 3600
+        if shift_duration < 5:
+            return 0
+        elif shift_duration < 6:
+            return 15
+        elif shift_duration < 8:
+            return 30
+        else:
+            return 45
+
+class ShiftGenerator:
+    def __init__(self, csv_file):
+        self.employees = []  # 従業員リスト
+        self.preferences = defaultdict(lambda: defaultdict(list))  # 従業員の希望シフト
+        self.load_data(csv_file)  # CSVファイルからデータを読み込む
+        self.jp_holidays = holidays.JP()  # 日本の祝日カレンダー
+        
         # 時間帯ごとの必要人数（平日, 土日祝）
         self.required_staff = {
             'morning': (5, 6),
@@ -38,190 +86,255 @@ class ShiftScheduler:
             'evening': (3, 4)
         }
         
-        # 最大人数の制約
-        self.max_staff = 10
-        
-    # 休日チェック関数
-    def check_if_busy_day(self, date):
-        # 土曜日（5）、日曜日（6）、または祝日の場合
-        return date.weekday() >= 5 or date in self.jp_holidays
-    
-        # 祝日リスト生成関数
-    def generate_holiday_list(self, start_date, end_date):
-        holidays = []
-        for day in holidays.between(start_date, end_date):
-            holidays.append(day)
-        return holidays
+        self.max_staff = 10  # 最大スタッフ数
+        self.schedule = {}  # 生成されたシフトスケジュール
 
-    # CSVファイルから従業員データを読み込むメソッド
-    def load_data(self, file_path: str):
-        # CSVファイルをDataFrameとして読み込む
+    def load_data(self, file_path):
+        """
+        CSVファイルから従業員データを読み込む
+        
+        :param file_path: CSVファイルのパス
+        """
         df = pd.read_csv(file_path)
         
-        # 従業員情報を格納するリスト
-        employees = []
-        
-        # 従業員ごとの希望シフトを格納する辞書
-        # 構造: {従業員ID: {日付: [(開始時間, 終了時間), ...], ...}, ...}
-        preferences = defaultdict(lambda: defaultdict(list))
-        
-        # DataFrameの各行を処理
         for _, row in df.iterrows():
-            # 従業員情報を辞書として作成
-            employee = {
-                'id': row['従業員ID'],
-                'name': row['name'],
-                'skills': row['skills'].split(',') if isinstance(row['skills'], str) else []
-            }
-            employees.append(employee)
+            employee = Employee(
+                id=row['従業員ID'],
+                name=row['name'],
+                register_skill='レジ' in row['skills'].split(','),
+                preferences={}
+            )
+            self.employees.append(employee)
             
-            # 希望日を日付オブジェクトに変換
-            date = datetime.strptime(row['希望日'], '%Y-%m-%d').date()
+            date = datetime.datetime.strptime(row['希望日'], '%Y-%m-%d').date()
             
-            # 出勤時間と退勤時間が両方とも有効な場合のみ処理
             if pd.notna(row['出勤時間']) and pd.notna(row['退勤時間']):
-                start_time = datetime.strptime(row['出勤時間'], '%H:%M').time()
-                end_time = datetime.strptime(row['退勤時間'], '%H:%M').time()
+                start_time = datetime.datetime.strptime(row['出勤時間'], '%H:%M').time()
+                end_time = datetime.datetime.strptime(row['退勤時間'], '%H:%M').time()
                 
-                # 従業員IDと日付に対応する希望シフトリストに追加
-                preferences[row['従業員ID']][date].append((start_time, end_time))
+                self.preferences[employee.id][date].append((start_time, end_time))
+                employee.preferences[date] = [(start_time, end_time)]
         
-        # 従業員情報と希望シフト情報を返す
-        return employees, preferences
-    
-    def print_imported_data(self):
-        print("インポートした従業員データ:")
-        for employee in self.employees:
-            print(f"ID: {employee['id']}, 名前: {employee['name']}, スキル: {', '.join(employee['skills'])}")
+    def get_shift_hours(self, shift_name):
+        """
+        シフト名から開始時間と終了時間を取得する
         
-        print("\n希望シフトデータ:")
-        for employee_id, dates in self.preferences.items():
-            print(f"従業員ID: {employee_id}")
-            for date, shifts in dates.items():
-                print(f"  日付: {date}")
-                for start, end in shifts:
-                    print(f"    {start.strftime('%H:%M')} - {end.strftime('%H:%M')}")
+        :param shift_name: シフト名 ('morning', 'afternoon', 'evening')
+        :return: (開始時間, 終了時間) のタプル
+        """
+        if shift_name == 'morning':
+            return datetime.time(9, 0), datetime.time(14, 0)
+        elif shift_name == 'afternoon':
+            return datetime.time(14, 0), datetime.time(17, 0)
+        elif shift_name == 'evening':
+            return datetime.time(17, 0), datetime.time(20, 0)
+        else:
+            raise ValueError(f"Invalid shift name: {shift_name}")
 
-    # スケジュールを生成するメソッド
-    def generate_schedule(self):
-        current_date = self.start_date
-        while current_date <= self.end_date:
+    def generate_shifts(self, start_date, end_date):
+        """
+        指定された期間のシフトを生成する
+        
+        :param start_date: シフト生成開始日
+        :param end_date: シフト生成終了日
+        :return: 生成されたシフト、人員不足情報、スキル（レジ）不足情報
+        """
+        current_date = start_date
+        shortages = defaultdict(lambda: defaultdict(int))
+        skill_shortages = defaultdict(lambda: defaultdict(int))
+
+        while current_date <= end_date:
             is_busy = self.check_if_busy_day(current_date)
-            self.generate_day_shifts(current_date, is_busy)
-            current_date += timedelta(days=1)
-            
-    def check_shift_coverage(self, date, is_busy):
-        warnings = []
-        for period in ['morning', 'afternoon', 'evening']:
-            staff_count = self.count_staff_in_timerange(date, period)
-            required = self.required_staff[period][1 if is_busy else 0]
+            day_shifts, day_shortages, day_skill_shortages = self.generate_day_shifts(current_date, is_busy)
+            self.schedule[current_date] = day_shifts
+            shortages[current_date] = day_shortages
+            skill_shortages[current_date] = day_skill_shortages
+            current_date += datetime.timedelta(days=1)
 
-            if staff_count < required:
-                warnings.append(f"{date}: {period}のシフトが足りません。必要: {required}, 現在: {staff_count}")
-            elif staff_count > self.max_staff:
-                warnings.append(f"{date}: {period}のシフトが多すぎます。最大: {self.max_staff}, 現在: {staff_count}")
-
-        return warnings
-
-    # 1日分のシフトを生成するメソッド
-    def generate_day_shifts(self, date, is_busy):
-        store_open = datetime.combine(date, time(9, 0))
-        store_close = datetime.combine(date, time(20, 0))
-        day_shifts = []
-
+        # シフト生成後、各従業員の希望シフト反映率を計算
         for employee in self.employees:
-            employee_preferences = self.preferences[employee['id']][date]
-            for start, end in employee_preferences:
-                shift_start = max(store_open, datetime.combine(date, start))
-                shift_end = min(store_close, datetime.combine(date, end))
-                if shift_start < shift_end:
-                    day_shifts.append(Shift(shift_start, shift_end, employee))
+            employee.calculate_preference_reflection_rate(start_date, end_date)
 
-        self.schedule[date] = day_shifts
-        self.check_shift_coverage(date, is_busy)
+        return self.schedule, shortages, skill_shortages
+
+    def check_if_busy_day(self, date):
+        """
+        指定された日が混雑日（土日祝）かどうかを判定する
         
-        # 2. その日のシフトを格納するリスト
-        day_shifts = []
+        :param date: 判定する日付
+        :return: 混雑日の場合True、そうでない場合False
+        """
+        return date.weekday() >= 5 or date in self.jp_holidays
 
-        # 3. 各従業員の希望シフトを確認
+    def generate_day_shifts(self, date, is_busy):
+        """
+        1日分のシフトを生成する
+        
+        :param date: シフトを生成する日付
+        :param is_busy: 混雑日かどうか
+        :return: 生成されたシフト、人員不足情報、スキル（レジ）不足情報
+        """
+        store_open = datetime.datetime.combine(date, datetime.time(9, 0))
+        store_close = datetime.datetime.combine(date, datetime.time(20, 0))
+        day_shifts = []
+        shortages = defaultdict(int)
+        skill_shortages = defaultdict(int)
+
         for employee in self.employees:
-            employee_preferences = self.preferences[employee['id']][date]
-            
-            # 4. 従業員の希望シフトがある場合、シフトを生成
+            employee_preferences = self.preferences[employee.id].get(date, [])
             for start, end in employee_preferences:
-                # 営業時間内に調整
-                shift_start = max(store_open, datetime.combine(date, start))
-                shift_end = min(store_close, datetime.combine(date, end))
-                
-                # シフトが有効な場合（開始時間が終了時間より前）、シフトを追加
+                shift_start = max(store_open, datetime.datetime.combine(date, start))
+                shift_end = min(store_close, datetime.datetime.combine(date, end))
                 if shift_start < shift_end:
                     day_shifts.append(Shift(shift_start, shift_end, employee))
 
-        # 5. 生成したシフトをスケジュールに追加
-        self.schedule[date] = day_shifts
+        self.check_shift_coverage(date, is_busy, day_shifts, shortages)
+        self.check_register_staff(date, is_busy, day_shifts, skill_shortages)
 
-        # 6. レジスタッフの配置をチェック
-        self.check_register_staff(date)
+        return day_shifts, shortages, skill_shortages
 
-        # 7. 警告の出力（シフトが足りない場合）
-    def check_shift_coverage(self, date, is_busy):
-        warnings = []
+    def check_shift_coverage(self, date, is_busy, shifts, shortages):
+        """
+        シフトの人員カバー状況をチェックする
+        
+        :param date: チェックする日付
+        :param is_busy: 混雑日かどうか
+        :param shifts: その日のシフトリスト
+        :param shortages: 人員不足情報を格納する辞書
+        """
         time_periods = [
-            ('morning', time(9, 0), time(14, 0)),
-            ('afternoon', time(14, 0), time(17, 0)),
-            ('evening', time(17, 0), time(20, 0))
+            ('morning', datetime.time(9, 0), datetime.time(14, 0)),
+            ('afternoon', datetime.time(14, 0), datetime.time(17, 0)),
+            ('evening', datetime.time(17, 0), datetime.time(20, 0))
         ]
 
         for period, start, end in time_periods:
-            staff_count = self.count_staff_in_timerange(date, start, end)
+            staff_count = self.count_staff_in_timerange(shifts, start, end)
             required = self.required_staff[period][1 if is_busy else 0]
 
             if staff_count < required:
-                warnings.append(f"{date}: {period}のシフトが足りません。必要: {required}, 現在: {staff_count}")
-            elif staff_count > self.max_staff:
-                warnings.append(f"{date}: {period}のシフトが多すぎます。最大: {self.max_staff}, 現在: {staff_count}")
+                shortages[period] = required - staff_count
 
-        return warnings
+    def check_register_staff(self, date, is_busy, shifts, skill_shortages):
+        """
+        レジスタッフの配置状況をチェックする
+        
+        :param date: チェックする日付
+        :param is_busy: 混雑日かどうか
+        :param shifts: その日のシフトリスト
+        :param skill_shortages: スキル（レジ）不足情報を格納する辞書
+        """
+        time_periods = [
+            ('morning', datetime.time(9, 0), datetime.time(14, 0)),
+            ('afternoon', datetime.time(14, 0), datetime.time(17, 0)),
+            ('evening', datetime.time(17, 0), datetime.time(20, 0))
+        ]
 
-    def count_staff_in_timerange(self, date, start_time, end_time):
-        count = 0
-        for shift in self.schedule[date]:
-            if (shift.start_time.time() < end_time and shift.end_time.time() > start_time):
-                count += 1
-        return count
+        for period, start, end in time_periods:
+            register_staff_count = self.count_register_staff_in_timerange(shifts, start, end)
+            required = self.required_register_staff[period][1 if is_busy else 0]
 
-class Shift:
-    def __init__(self, start_time, end_time, employee):
-        self.start_time = start_time
-        self.end_time = end_time
-        self.employee = employee
+            if register_staff_count < required:
+                skill_shortages[period] = required - register_staff_count
 
-    # レジスタッフの配置をチェックするメソッド（未実装）
-    def check_register_staff(self):
-        # レジスタッフの配置をチェックします
-        pass
+    def count_staff_in_timerange(self, shifts, start_time, end_time):
+        """
+        指定された時間範囲内のスタッフ数をカウントする
+        
+        :param shifts: シフトのリスト
+        :param start_time: 開始時間
+        :param end_time: 終了時間
+        :return: スタッフ数
+        """
+        return sum(1 for shift in shifts if shift.start_time.time() < end_time and shift.end_time.time() > start_time)
 
-    # 休憩時間を計算するメソッド（未実装）
-    def calculate_breaks(self):
-        # 休憩時間を計算します
-        pass
+    def count_register_staff_in_timerange(self, shifts, start_time, end_time):
+        """
+        指定された時間範囲内のレジスタッフ数をカウントする
+        
+        :param shifts: シフトのリスト
+        :param start_time: 開始時間
+        :param end_time: 終了時間
+        :return: レジスタッフ数
+        """
+        return sum(1 for shift in shifts if shift.start_time.time() < end_time and shift.end_time.time() > start_time and shift.employee.register_skill)
 
-    # 希望反映率を計算するメソッド（未実装）
-    def calculate_preference_reflection_rates(self):
-        # 希望反映率を計算します
-        pass
+    def display_preference_rates(self):
+        """
+        全従業員のシフト希望反映率を表示する
+        """
+        print("シフト希望反映率:")
+        for employee in self.employees:
+            print(f"{employee.name}: {employee.preference_reflection_rate:.2f}%")
 
-    # 個別の希望反映率を調整するメソッド（未実装）
-    def adjust_individual_reflection_rates(self, employee, rate):
-        # 個別の希望反映率を調整します
-        pass
+    def set_preference_rate(self, employee_id, rate):
+        """
+        指定された従業員のシフト希望反映率を設定する
+        
+        :param employee_id: 従業員ID
+        :param rate: 設定する反映率
+        """
+        for employee in self.employees:
+            if employee.id == employee_id:
+                employee.preference_reflection_rate = rate
+                break
 
-    # スケジュールを表示するメソッド
-    def print_schedule(self):
-        for date, shifts in self.schedule.items():
-            print(f"Date: {date}")
-            for shift in shifts:
-                print(f"  {shift.employee.name}: {shift.start_time} - {shift.end_time}")
-            print()
+    def display_shifts(self, start_date, end_date):
+        """
+        指定された期間のシフトを表示する
+        
+        :param start_date: 表示開始日
+        :param end_date: 表示終了日
+        """
+        current_date = start_date
+        while current_date <= end_date:
+            print(f"\n日付: {current_date}")
+            if current_date in self.schedule:
+                for shift in self.schedule[current_date]:
+                    print(f"  {shift.employee.name}: {shift.start_time.time()} - {shift.end_time.time()} (休憩: {shift.break_time}分)")
+            else:
+                print("  シフトなし")
+            current_date += datetime.timedelta(days=1)
 
-print("======================ok=====================")
+    def calculate_overall_preference_reflection_rate(self, start_date, end_date):
+        """
+        指定された期間の全体的なシフト希望反映率を計算する
+        
+        :param start_date: 計算開始日
+        :param end_date: 計算終了日
+        :return: 全体的なシフト希望反映率
+        """
+        total_preferred_hours = 0
+        total_assigned_hours = 0
+        current_date = start_date
+        while current_date <= end_date:
+            for employee in self.employees:
+                preferred_hours = sum((end - start).total_seconds() / 3600 
+                                      for start, end in employee.preferences.get(current_date, []))
+                assigned_hours = sum((shift.end_time - shift.start_time).total_seconds() / 3600 
+                                     for shift in self.schedule.get(current_date, []) if shift.employee.id == employee.id)
+                total_preferred_hours += preferred_hours
+                total_assigned_hours += assigned_hours
+            current_date += datetime.timedelta(days=1)
+        
+        if total_preferred_hours > 0:
+            return (total_assigned_hours / total_preferred_hours) * 100
+        else:
+            return 0
+
+    def calculate_employee_preference_reflection_rate(self, employee_id, start_date, end_date):
+        """
+        指定された従業員の指定期間におけるシフト希望反映率を計算する
+        
+        :param employee_id: 従業員ID
+        :param start_date: 計算開始日
+        :param end_date: 計算終了日
+        :return: 従業員のシフト希望反映率
+        """
+        employee = next((emp for emp in self.employees if emp.id == employee_id), None)
+        if not employee:
+            return 0
+
+        return employee.calculate_preference_reflection_rate(start_date, end_date)
+    
+print("======================ok=============================")
