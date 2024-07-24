@@ -11,6 +11,9 @@ end_date = datetime.date(2024, 7, 1)    # 2024年7月7日まで（1週間分）
 # シフトを生成
 generated_shifts, shortages, skill_shortages = shift_generator.generate_shifts(start_date, end_date)
 
+# 従業員のスキル情報を表示
+shift_generator.display_employee_skills()
+
 # 生成されたシフトを表示
 print("生成されたシフト:")
 shift_generator.display_shifts(start_date, end_date)

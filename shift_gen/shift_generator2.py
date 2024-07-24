@@ -4,11 +4,12 @@ from collections import defaultdict
 import holidays
 
 class Employee:
-    def __init__(self, id, name, register_skill, refrigeration_skill, preferences):
+    def __init__(self, id, name, register_skill, refrigeration_skill, stocking_skill, preferences):
         self.id = id
         self.name = name
         self.register_skill = register_skill
         self.refrigeration_skill = refrigeration_skill
+        self.stocking_skill = stocking_skill
         self.preferences = preferences
         self.shifts = []
 
@@ -72,12 +73,13 @@ class ShiftGenerator:
         df = pd.read_csv(file_path)
         
         for _, row in df.iterrows():
-            skills = row['skills'].split(',')
+            skills = row['skills'].split(',')  # カンマで分割
             employee = Employee(
                 id=row['従業員ID'],
                 name=row['name'],
                 register_skill='レジ' in skills,
                 refrigeration_skill='冷蔵' in skills,
+                stocking_skill='品出し' in skills,
                 preferences={}
             )
             self.employees.append(employee)
@@ -88,7 +90,7 @@ class ShiftGenerator:
                 start_time = datetime.datetime.strptime(row['出勤時間'], '%H:%M').time()
                 end_time = datetime.datetime.strptime(row['退勤時間'], '%H:%M').time()
                 
-                self.preferences[employee.id][date].append((start_time, end_time))
+                self.preferences[employee.id][date] = [(start_time, end_time)]
                 employee.preferences[date] = [(start_time, end_time)]
         
 
@@ -223,6 +225,18 @@ class ShiftGenerator:
                     if shift.start_time.time() < end_time 
                     and shift.end_time.time() > start_time 
                     and shift.employee.refrigeration_skill)
+    
+    def display_employee_skills(self):
+        print("\n従業員のスキル情報:")
+        for employee in self.employees:
+            skills = []
+            if employee.register_skill:
+                skills.append("レジ")
+            if employee.refrigeration_skill:
+                skills.append("冷蔵")
+            if employee.stocking_skill:
+                skills.append("品出し")
+            print(f"{employee.id}. {employee.name}: {', '.join(skills)}")
 
 
 
