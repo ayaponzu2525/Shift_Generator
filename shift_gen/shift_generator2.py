@@ -4,43 +4,13 @@ from collections import defaultdict
 import holidays
 
 class Employee:
-    def __init__(self, id, name, register_skill, preferences):
-        self.id = id  # 従業員ID
-        self.name = name  # 従業員の名前
-        self.register_skill = register_skill  # レジスキルの有無（True/False）
-        self.preferences = preferences  # 希望シフト時間のリスト（辞書形式：{日付: [(開始時間, 終了時間), ...]}）
-        self.shifts = []  # 割り当てられたシフトを格納するリスト
-        self.preference_reflection_rate = None  # 希望シフトの反映率（初期値はNone、シフト生成後に計算）
-
-    def calculate_preference_reflection_rate(self, start_date, end_date):
-        """
-        指定された期間における希望シフトの反映率を計算する
-        
-        :param start_date: 計算開始日
-        :param end_date: 計算終了日
-        :return: 希望シフトの反映率（0-100の範囲）
-        """
-        total_preferred_hours = 0
-        total_assigned_hours = 0
-        current_date = start_date
-        while current_date <= end_date:
-            # その日の希望シフト時間を合計
-            preferred_hours = sum((end - start).total_seconds() / 3600 
-                                  for start, end in self.preferences.get(current_date, []))
-            # その日の割り当てられたシフト時間を合計
-            assigned_hours = sum((shift.end_time - shift.start_time).total_seconds() / 3600 
-                                 for shift in self.shifts if shift.start_time.date() == current_date)
-            total_preferred_hours += preferred_hours
-            total_assigned_hours += assigned_hours
-            current_date += datetime.timedelta(days=1)
-        
-        # 希望シフト時間がある場合のみ反映率を計算
-        if total_preferred_hours > 0:
-            self.preference_reflection_rate = (total_assigned_hours / total_preferred_hours) * 100
-        else:
-            self.preference_reflection_rate = 0
-        
-        return self.preference_reflection_rate
+    def __init__(self, id, name, register_skill, refrigeration_skill, preferences):
+        self.id = id
+        self.name = name
+        self.register_skill = register_skill
+        self.refrigeration_skill = refrigeration_skill
+        self.preferences = preferences
+        self.shifts = []
 
 class Shift:
     def __init__(self, start_time, end_time, employee):
@@ -60,7 +30,7 @@ class Shift:
             return 0
         elif shift_duration < 6:
             return 15
-        elif shift_duration < 8:
+        elif shift_duration < 7:
             return 30
         else:
             return 45
@@ -88,6 +58,10 @@ class ShiftGenerator:
         
         self.max_staff = 10  # 最大スタッフ数
         self.schedule = {}  # 生成されたシフトスケジュール
+        
+        self.required_refrigeration_staff = {
+            'evening': (1, 1)  # 平日, 土日祝
+        }
 
     def load_data(self, file_path):
         """
@@ -98,10 +72,12 @@ class ShiftGenerator:
         df = pd.read_csv(file_path)
         
         for _, row in df.iterrows():
+            skills = row['skills'].split(',')
             employee = Employee(
                 id=row['従業員ID'],
                 name=row['name'],
-                register_skill='レジ' in row['skills'].split(','),
+                register_skill='レジ' in skills,
+                refrigeration_skill='冷蔵' in skills,
                 preferences={}
             )
             self.employees.append(employee)
@@ -115,22 +91,15 @@ class ShiftGenerator:
                 self.preferences[employee.id][date].append((start_time, end_time))
                 employee.preferences[date] = [(start_time, end_time)]
         
-    def get_shift_hours(self, shift_name):
-        """
-        シフト名から開始時間と終了時間を取得する
-        
-        :param shift_name: シフト名 ('morning', 'afternoon', 'evening')
-        :return: (開始時間, 終了時間) のタプル
-        """
-        if shift_name == 'morning':
-            return datetime.time(9, 0), datetime.time(14, 0)
-        elif shift_name == 'afternoon':
-            return datetime.time(14, 0), datetime.time(17, 0)
-        elif shift_name == 'evening':
-            return datetime.time(17, 0), datetime.time(20, 0)
-        else:
-            raise ValueError(f"Invalid shift name: {shift_name}")
 
+    def generate_shifts(self, start_date, end_date):
+        """
+        指定された期間のシフトを生成する
+        
+        :param start_date: シフト生成開始日
+        :param end_date: シフト生成終了日
+        :return: 生成されたシフト、人員不足情報、スキル（レジ）不足情報
+        """
     def generate_shifts(self, start_date, end_date):
         """
         指定された期間のシフトを生成する
@@ -150,10 +119,6 @@ class ShiftGenerator:
             shortages[current_date] = day_shortages
             skill_shortages[current_date] = day_skill_shortages
             current_date += datetime.timedelta(days=1)
-
-        # シフト生成後、各従業員の希望シフト反映率を計算
-        for employee in self.employees:
-            employee.calculate_preference_reflection_rate(start_date, end_date)
 
         return self.schedule, shortages, skill_shortages
 
@@ -188,12 +153,13 @@ class ShiftGenerator:
                 if shift_start < shift_end:
                     day_shifts.append(Shift(shift_start, shift_end, employee))
 
-        self.check_shift_coverage(date, is_busy, day_shifts, shortages)
-        self.check_register_staff(date, is_busy, day_shifts, skill_shortages)
+        self.check_shift_coverage(is_busy, day_shifts, shortages)
+        self.check_register_staff(is_busy, day_shifts, skill_shortages)
+        self.check_refrigeration_staff(is_busy, day_shifts, skill_shortages)
 
         return day_shifts, shortages, skill_shortages
 
-    def check_shift_coverage(self, date, is_busy, shifts, shortages):
+    def check_shift_coverage(self, is_busy, shifts, shortages):
         """
         シフトの人員カバー状況をチェックする
         
@@ -215,7 +181,7 @@ class ShiftGenerator:
             if staff_count < required:
                 shortages[period] = required - staff_count
 
-    def check_register_staff(self, date, is_busy, shifts, skill_shortages):
+    def check_register_staff(self, is_busy, shifts, skill_shortages):
         """
         レジスタッフの配置状況をチェックする
         
@@ -235,7 +201,30 @@ class ShiftGenerator:
             required = self.required_register_staff[period][1 if is_busy else 0]
 
             if register_staff_count < required:
-                skill_shortages[period] = required - register_staff_count
+                skill_shortages[f'{period}_register'] = required - register_staff_count
+    
+    def check_refrigeration_staff(self, is_busy, shifts, skill_shortages):
+        '''
+        冷蔵スキル持つスタッフの配置
+        '''
+        evening_start = datetime.time(17, 0)
+        evening_end = datetime.time(20, 0)
+        refrigeration_staff_count = self.count_refrigeration_staff_in_timerange(shifts, evening_start, evening_end)
+        required = self.required_refrigeration_staff['evening'][1 if is_busy else 0]
+
+        if refrigeration_staff_count < required:
+            skill_shortages['evening_refrigeration'] = required - refrigeration_staff_count
+    
+    def count_refrigeration_staff_in_timerange(self, shifts, start_time, end_time):
+        '''
+        冷蔵スキルを持つスタッフが必要数いるかカウント
+        '''
+        return sum(1 for shift in shifts 
+                    if shift.start_time.time() < end_time 
+                    and shift.end_time.time() > start_time 
+                    and shift.employee.refrigeration_skill)
+
+
 
     def count_staff_in_timerange(self, shifts, start_time, end_time):
         """
@@ -304,23 +293,16 @@ class ShiftGenerator:
         :param end_date: 計算終了日
         :return: 全体的なシフト希望反映率
         """
-        total_preferred_hours = 0
-        total_assigned_hours = 0
-        current_date = start_date
-        while current_date <= end_date:
-            for employee in self.employees:
-                preferred_hours = sum((end - start).total_seconds() / 3600 
-                                      for start, end in employee.preferences.get(current_date, []))
-                assigned_hours = sum((shift.end_time - shift.start_time).total_seconds() / 3600 
-                                     for shift in self.schedule.get(current_date, []) if shift.employee.id == employee.id)
-                total_preferred_hours += preferred_hours
-                total_assigned_hours += assigned_hours
-            current_date += datetime.timedelta(days=1)
+        employee_rates = []
+        for employee in self.employees:
+            rate = self.calculate_employee_preference_reflection_rate(employee.id, start_date, end_date)
+            if rate != 100:  # 希望シフトがある従業員のみ計算に含める
+                employee_rates.append(rate)
         
-        if total_preferred_hours > 0:
-            return (total_assigned_hours / total_preferred_hours) * 100
+        if employee_rates:
+            return sum(employee_rates) / len(employee_rates)
         else:
-            return 0
+            return 100  # 全員希望シフトがない場合は100%とする
 
     def calculate_employee_preference_reflection_rate(self, employee_id, start_date, end_date):
         """
@@ -335,6 +317,30 @@ class ShiftGenerator:
         if not employee:
             return 0
 
-        return employee.calculate_preference_reflection_rate(start_date, end_date)
+        total_preferred_minutes = 0
+        total_assigned_minutes = 0
+        current_date = start_date
+        while current_date <= end_date:
+            preferred_shifts = employee.preferences.get(current_date, [])
+            if preferred_shifts:  # 希望シフトがある日のみ計算
+                preferred_minutes = sum(self.time_diff_in_minutes(end, start) for start, end in preferred_shifts)
+                assigned_shifts = [shift for shift in self.schedule.get(current_date, []) if shift.employee.id == employee_id]
+                assigned_minutes = sum(self.time_diff_in_minutes(shift.end_time.time(), shift.start_time.time()) for shift in assigned_shifts)
+                total_preferred_minutes += preferred_minutes
+                total_assigned_minutes += assigned_minutes
+            current_date += datetime.timedelta(days=1)
+        
+        if total_preferred_minutes > 0:
+            return (total_assigned_minutes / total_preferred_minutes) * 100
+        else:
+            return 100  # 希望シフトがない場合は100%とする
+
+    @staticmethod
+    def time_diff_in_minutes(end, start):
+        '''
+        時間の計算を分単位で行う
+        '''
+        return ((datetime.datetime.combine(datetime.date.today(), end) - 
+                datetime.datetime.combine(datetime.date.today(), start)).total_seconds() / 60)
     
 print("======================ok=============================")
