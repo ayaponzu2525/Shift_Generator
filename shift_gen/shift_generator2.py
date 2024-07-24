@@ -1,4 +1,5 @@
 import pandas as pd
+import csv
 import datetime
 from collections import defaultdict
 import holidays
@@ -70,10 +71,11 @@ class ShiftGenerator:
         
         :param file_path: CSVファイルのパス
         """
-        df = pd.read_csv(file_path)
+        df = pd.read_csv(file_path, quoting=csv.QUOTE_ALL)
         
         for _, row in df.iterrows():
             skills = row['skills'].split(',')  # カンマで分割
+            skills = [skill.strip() for skill in skills]  # 各スキルの前後の空白を削除
             employee = Employee(
                 id=row['従業員ID'],
                 name=row['name'],

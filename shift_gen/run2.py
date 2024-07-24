@@ -24,6 +24,8 @@ for date, shifts in shortages.items():
     for shift_name, shortage in shifts.items():
         if shortage > 0:
             print(f"{date} {shift_name}: {shortage}人不足")
+        else:
+            print("なし")
 
 # スキル不足情報を表示
 print("\nスキル不足情報:")
@@ -31,6 +33,8 @@ for date, skills in skill_shortages.items():
     for skill_name, shortage in skills.items():
         if shortage > 0:
             print(f"{date} {skill_name}: {shortage}人不足")
+        else:
+            print("なし")
 
 # 全体のシフト希望反映率を計算して表示
 overall_reflection_rate = shift_generator.calculate_overall_preference_reflection_rate(start_date, end_date)
