@@ -178,6 +178,44 @@ class ShiftAI:
                 solution[e.id][s] = solver.Value(shifts[(e.id, s)]) == 1
         return solution
 
+    def get_historical_data(db_file):
+        conn = sqlite3.connect(db_file, detect_types=sqlite3.PARSE_DECLTYPES|sqlite3.PARSE_COLNAMES)
+        cursor = conn.cursor()
+        
+        historical_data = {}
+        
+        cursor.execute("""
+        SELECT desired_date, employee_id, name, skills, clock_in, clock_out
+        FROM shifts
+        WHERE clock_in IS NOT NULL AND clock_out IS NOT NULL
+        ORDER BY desired_date
+        """)
+        
+        rows = cursor.fetchall()
+        
+        for row in rows:
+            desired_date, employee_id, name, skills, clock_in, clock_out = row
+            
+            if desired_date not in historical_data:
+                historical_data[desired_date] = []
+            
+            skills_list = skills.split(',') if skills else []
+            
+            employee = Employee(id=employee_id, name=name, skills=skills_list, desired_date=None, clock_in=None, clock_out=None)
+            
+            shift = Shift(
+                employee=employee,
+                start_time=datetime.strptime(clock_in, '%H:%M').time(),
+                end_time=datetime.strptime(clock_out, '%H:%M').time()
+            )
+            
+            historical_data[desired_date].append(shift)
+        
+        conn.close()
+    
+        return historical_data
+
+# メイン関数内で以下のように使用
 def main():
     db_file = 'shiftlist.db'
     employee_data = read_data_from_sqlite(db_file)
@@ -192,19 +230,9 @@ def main():
         'required_staff': 2
     }
 
-    historical_data = {
-        datetime(2024, 7, 1).date(): [
-            Shift(employee=employees[0], start_time=datetime.strptime("09:00", "%H:%M").time(), end_time=datetime.strptime("14:00", "%H:%M").time()),
-            Shift(employee=employees[1], start_time=datetime.strptime("9:00", "%H:%M").time(), end_time=datetime.strptime("14:00", "%H:%M").time()),
-            Shift(employee=employees[2], start_time=datetime.strptime("09:00", "%H:%M").time(), end_time=datetime.strptime("17:00", "%H:%M").time()),
-            Shift(employee=employees[4], start_time=datetime.strptime("12:00", "%H:%M").time(), end_time=datetime.strptime("20:00", "%H:%M").time()),
-            Shift(employee=employees[6], start_time=datetime.strptime("14:00", "%H:%M").time(), end_time=datetime.strptime("20:00", "%H:%M").time()),
-            Shift(employee=employees[7], start_time=datetime.strptime("13:00", "%H:%M").time(), end_time=datetime.strptime("20:00", "%H:%M").time()),
-            Shift(employee=employees[10], start_time=datetime.strptime("09:00", "%H:%M").time(), end_time=datetime.strptime("14:00", "%H:%M").time()),
-            Shift(employee=employees[14], start_time=datetime.strptime("17:00", "%H:%M").time(), end_time=datetime.strptime("20:00", "%H:%M").time()),
-            Shift(employee=employees[16], start_time=datetime.strptime("12:00", "%H:%M").time(), end_time=datetime.strptime("18:00", "%H:%M").time()),
-        ]
-    }
+    historical_data = ShiftAI.get_historical_data(db_file)
+    
+    # ... 以下は変更なし
 
     shift_ai = ShiftAI(employees, shifts, constraints, historical_data)
     
